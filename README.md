@@ -2,6 +2,12 @@
 
 FitFindr is a multi-tool AI agent that helps users find secondhand clothing and figure out how to wear it. You describe what you're looking for in natural language, and the agent searches a dataset of mock thrift listings, uses an LLM to suggest outfit combinations from your existing wardrobe, and generates a shareable OOTD caption — all in a single interaction.
 
+![GUI of FitFindr](https://github.com/hkumar30/ai201-project2-fitfindr-starter/blob/e2f39c2ba8f8cf8668bdfe7404aee323d522686f/images/fitfindr_gui_example.png)
+
+<center><p> Figure 1. GUI of FitFindr - Your Smart Personal Wardrobe</p></center>
+
+Demo: https://www.youtube.com/watch?v=jx7j3betvBo
+
 ## Setup
 
 ```bash
@@ -223,6 +229,10 @@ fit_card: None
 ```
 The agent names the original query, explains why it failed (all three filters combined left nothing), and tells the user exactly what levers to adjust.
 
+![](https://github.com/hkumar30/ai201-project2-fitfindr-starter/blob/e2f39c2ba8f8cf8668bdfe7404aee323d522686f/images/search_listings_not_found.png)
+
+<center><p> Figure 2. No results found </p></center>
+
 ---
 
 ### `suggest_outfit` — Wardrobe is empty
@@ -239,6 +249,10 @@ print(suggest_outfit(results[0], get_empty_wardrobe()))
 "
 ```
 Output (summarized): a multi-sentence response about what kinds of bottoms and outerwear pair well with a Y2K butterfly baby tee, what aesthetic it fits, and what occasions it suits — without referencing any wardrobe pieces that don't exist.
+
+![](https://github.com/hkumar30/ai201-project2-fitfindr-starter/blob/e2f39c2ba8f8cf8668bdfe7404aee323d522686f/images/search_listings_empty_wardrobe.png)
+
+<center><p> Figure 3. General Styled Prompt in case of empty wardrobe </p></center>
 
 ---
 
@@ -294,6 +308,10 @@ Output:
 Unable to generate fit card: no outfit suggestion was provided.
 ```
 No API call is made. This means a broken `suggest_outfit` upstream doesn't cause a cascade failure — the agent can still surface the listing and the error message.
+
+![](https://github.com/hkumar30/ai201-project2-fitfindr-starter/blob/e2f39c2ba8f8cf8668bdfe7404aee323d522686f/images/create_fit_card_empty.png)
+
+<center><p> Figure 4. No outfit suggestion provided </p></center>
 
 ---
 
