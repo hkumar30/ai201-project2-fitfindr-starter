@@ -66,7 +66,62 @@ If `outfit` is empty/whitespace, the function returns the descriptive error stri
 
 ### Additional Tools (if any)
 
-No additional tools are required for the core (Milestones 1–6) implementation.
+### Tool 4: compare_price
+
+**What it does:**
+Finds listings in the dataset with the same category and at least one overlapping style tag as the target item, computes the price distribution of those comparables (avg, median, min, max), and returns a plain-English verdict (great deal / fair price / above average) with the numbers used to reach it.
+
+**Input parameters:**
+- `item` (dict): The selected listing dict — uses `id`, `category`, `style_tags`, and `price`.
+- `listings` (list[dict]): The full dataset (returned by `load_listings()`), used to find comparables. The item itself is excluded from the comparable set.
+
+**What it returns:**
+A `str` with three lines: the price and verdict, the comparable set stats, and one sentence of reasoning. Example: `"Price: $18.00 — GREAT DEAL\nComparable tops (7 listings): avg $23.14, range $15.00–$35.00\nReasoning: Y2K Baby Tee is priced below the $23.14 average for tops with similar style tags."` Returns `"Not enough comparable listings to assess pricing for {title}."` if fewer than 2 comparables are found.
+
+**What happens if it fails or returns nothing:**
+If fewer than 2 comparables exist, returns the informative string above — never raises. The agent still proceeds to `get_trend_report` and `suggest_outfit`.
+
+---
+
+### Tool 5: get_trend_report
+
+**What it does:**
+Loads trend data from `data/trends.json` (aggregated from Depop trending searches and Pinterest fashion boards, updated seasonally), cross-references the item's style tags, category, and colors against the current trending aesthetics and categories, and uses the Groq LLM to produce a 2–3 sentence trend assessment.
+
+**Input parameters:**
+- `item` (dict): The selected listing dict — uses `title`, `category`, `style_tags`, and `colors`.
+
+**What it returns:**
+A `str` with a trend assessment: whether the item is on-trend, which current aesthetics it aligns with, and how that context should influence how it's styled. This string is passed into `suggest_outfit` as trend context so the outfit recommendations reflect the current fashion moment. Returns `"Trend data unavailable — styling without trend context."` if the trends file is missing or the LLM call fails.
+
+**What happens if it fails or returns nothing:**
+If `data/trends.json` is missing or unreadable, returns the fallback string above. If the LLM call raises, catches the exception and returns the same fallback. The agent continues normally — trend context becomes `None` in the `suggest_outfit` prompt.
+
+---
+
+### Style Profile Memory (save/load functions, not a standalone tool)
+
+**What it does:**
+`load_style_profile()` reads `user_profile.json` from the project root (or returns an empty profile if the file doesn't exist). `save_style_profile(session)` extracts the selected item's style tags, the parsed size, and the description from the completed session and merges them into the profile, keeping up to 15 unique style tags (most recent first) and the most recently used size.
+
+**Input parameters (save_style_profile):**
+- `session` (dict): The completed session dict — reads `selected_item`, `parsed["size"]`, and `parsed["description"]`.
+
+**What it returns:**
+`load_style_profile()` returns a `dict` with keys `preferred_styles` (list[str]), `preferred_size` (str | None), and `search_history` (list[str], last 5). `save_style_profile` returns `None` — side effect only.
+
+**What happens if it fails or returns nothing:**
+If `user_profile.json` is missing or contains malformed JSON, `load_style_profile()` catches the exception and returns an empty profile. `save_style_profile` catches write errors silently — a failed save doesn't abort the session.
+
+---
+
+### Retry Logic (planning loop modification, not a separate function)
+
+**What it does:**
+If `search_listings` returns an empty list and a size filter was applied, the agent retries automatically without the size filter and records what was loosened in `session["retry_info"]`. If still empty and a price filter was applied, retries with both filters removed. Informs the user of what was adjusted in the output.
+
+**What happens if all retries fail:**
+Sets `session["error"]` as before and returns early.
 
 ---
 
@@ -74,27 +129,35 @@ No additional tools are required for the core (Milestones 1–6) implementation.
 
 **How does your agent decide which tool to call next?**
 
-The loop is a fixed linear sequence with one conditional early-exit. Here is the exact decision logic:
+The loop is a linear sequence with one conditional early-exit and retry logic. Here is the exact decision logic:
 
-1. **Parse** — Always runs first. Extract `description`, `size`, and `max_price` from the raw query using regex:
+1. **Load style profile** — `load_style_profile()` reads `user_profile.json`. If the file exists, `preferred_styles` and `preferred_size` are available as context for later steps. If not, an empty profile is used.
+
+2. **Parse** — Extract `description`, `size`, and `max_price` from the raw query using regex:
    - price: match `r'(?:under|below|less than|up to|max)\s*\$?(\d+(?:\.\d+)?)'` → parse as float
-   - size: match `r'\bsize\s+([A-Z0-9/]+)'` (case-insensitive) → extract token; also check standalone tokens like `"M"`, `"XL"`, `"S/M"` with `r'\b(XXS|XS|S/M|S|M|L|XL|XXL)\b'`
-   - description: the original query with matched price and size clauses stripped, then lowercased and whitespace-normalized
+   - size: match `r'\bsize\s+([A-Z0-9/]+)'` first; fallback to `r'\b(XXS|XS|S/M|M/L|L/XL|S|M|L|XL|XXL|XXXL)\b'`
+   - description: the original query with price and size clauses stripped, lowercased, whitespace-normalized
    - Store results in `session["parsed"]`.
 
-2. **Call `search_listings`** — Always runs after parsing. Pass `session["parsed"]["description"]`, `session["parsed"]["size"]`, and `session["parsed"]["max_price"]`.
-   - **Condition**: If `session["search_results"]` is empty → set `session["error"]` to a user-facing message, return session immediately. The remaining tools are skipped entirely.
-   - If results exist → store `session["search_results"]`, set `session["selected_item"] = session["search_results"][0]`, continue.
+3. **Call `search_listings` with retry** — Always runs after parsing.
+   - **First attempt**: use all three parsed parameters.
+   - **Condition 1**: If results are empty AND `size` was set → retry with `size=None`, store `session["retry_info"] = "No results for size '{size}'. Showing results without size filter."` If retry finds results, continue to step 4.
+   - **Condition 2**: If still empty AND `max_price` was set → retry with both `size=None` and `max_price=None`, update `session["retry_info"]` to describe both loosened constraints.
+   - **Condition 3**: If still empty after all retries → set `session["error"]`, return session immediately. No downstream tools are called.
 
-3. **Call `suggest_outfit`** — Only reached if step 2 found results. Pass `session["selected_item"]` and `session["wardrobe"]`.
-   - Store result in `session["outfit_suggestion"]`.
+4. **Select top result** — `session["selected_item"] = session["search_results"][0]`.
 
-4. **Call `create_fit_card`** — Only reached after step 3. Pass `session["outfit_suggestion"]` and `session["selected_item"]`.
-   - Store result in `session["fit_card"]`.
+5. **Call `compare_price`** — Pass `session["selected_item"]` and all listings. Store result in `session["price_assessment"]`.
 
-5. **Return session** — The loop is complete. `session["error"]` is `None`.
+6. **Call `get_trend_report`** — Pass `session["selected_item"]`. Store result in `session["trend_report"]`.
 
-The agent knows it is done when `create_fit_card` returns (happy path) or when `search_listings` returns an empty list (early exit). There is no retry or backtracking in the base implementation.
+7. **Call `suggest_outfit`** — Pass `session["selected_item"]`, `session["wardrobe"]`, and a combined context string built from `session["trend_report"]` and the loaded style profile's `preferred_styles`. Store result in `session["outfit_suggestion"]`.
+
+8. **Call `create_fit_card`** — Pass `session["outfit_suggestion"]` and `session["selected_item"]`. Store result in `session["fit_card"]`.
+
+9. **Save style profile** — `save_style_profile(session)` merges the current session's style tags and size into `user_profile.json`.
+
+10. **Return session** — `session["error"]` is `None` on success.
 
 ---
 
@@ -107,15 +170,18 @@ All state lives in a single `session` dict initialized by `_new_session()`. No g
 | Key | Set by | Used by |
 |-----|--------|---------|
 | `session["query"]` | `_new_session()` at start | Error messages; query parsing |
-| `session["parsed"]` | Regex parsing in `run_agent` | `search_listings` call |
-| `session["search_results"]` | `search_listings` return value | Selecting `selected_item` |
-| `session["selected_item"]` | `session["search_results"][0]` | `suggest_outfit`, `create_fit_card` |
+| `session["parsed"]` | Regex parsing in `run_agent` | `search_listings` call; `save_style_profile` |
+| `session["search_results"]` | `search_listings` return value (after any retries) | Selecting `selected_item` |
+| `session["retry_info"]` | Set when retry logic loosens a constraint | Prepended to listing panel in UI |
+| `session["selected_item"]` | `session["search_results"][0]` | `compare_price`, `get_trend_report`, `suggest_outfit`, `create_fit_card` |
 | `session["wardrobe"]` | Passed in by caller, stored in `_new_session()` | `suggest_outfit` |
+| `session["price_assessment"]` | `compare_price` return value | Displayed in price panel in UI |
+| `session["trend_report"]` | `get_trend_report` return value | Passed as context into `suggest_outfit` |
 | `session["outfit_suggestion"]` | `suggest_outfit` return value | `create_fit_card` |
 | `session["fit_card"]` | `create_fit_card` return value | Returned to caller / displayed in UI |
-| `session["error"]` | Set on empty search results or caught exceptions | Checked by `app.py` before rendering |
+| `session["error"]` | Set on empty search results after all retries | Checked by `app.py` before rendering |
 
-The user never re-enters any intermediate value. The item found in step 2 is automatically passed into steps 3 and 4 by reading `session["selected_item"]`. The outfit from step 3 is passed into step 4 by reading `session["outfit_suggestion"]`.
+The user never re-enters any intermediate value. Style profile context from previous sessions flows in at step 1 and flows out at step 9 — the second session automatically uses style tags learned from the first.
 
 ---
 
@@ -125,9 +191,12 @@ For each tool, describe the specific failure mode you're handling and what the a
 
 | Tool | Failure mode | Agent response |
 |------|-------------|----------------|
-| search_listings | Returns an empty list because no listings match the description, size, and price filters | Sets `session["error"]` to `"No listings found matching '{query}'. Try different keywords, a different size, or a higher price limit."` and returns the session immediately without calling `suggest_outfit` or `create_fit_card`. The UI displays this message in the first panel. |
+| search_listings | Returns an empty list with size and/or price filters set | Retry logic kicks in: retries without size first, then without price+size. Sets `session["retry_info"]` on successful retry. If all retries fail, sets `session["error"]` to `"No listings found matching '{query}'. Try different keywords, a different size, or a higher price limit."` and returns immediately. |
 | suggest_outfit | `wardrobe["items"]` is an empty list (new user has no saved clothes) | Switches to a general-styling prompt asking the LLM what types of pieces pair well with the new item and what aesthetic it fits, rather than attempting to reference specific wardrobe pieces. Returns a non-empty string. |
-| create_fit_card | `outfit` argument is an empty string or whitespace-only (e.g., if `suggest_outfit` returned `""`) | Returns the string `"Unable to generate fit card: no outfit suggestion was provided."` without calling the LLM. No exception is raised; the agent can still surface the listing and the empty outfit result to the user. |
+| create_fit_card | `outfit` argument is an empty string or whitespace-only | Returns `"Unable to generate fit card: no outfit suggestion was provided."` without calling the LLM. No exception is raised. |
+| compare_price | Fewer than 2 comparable listings found in the dataset | Returns `"Not enough comparable listings to assess pricing for {title}."` — agent continues to next step. |
+| get_trend_report | `data/trends.json` missing, or LLM call fails | Returns `"Trend data unavailable — styling without trend context."` — trend context passed to `suggest_outfit` as `None`, prompt runs without it. |
+| load_style_profile | `user_profile.json` missing or contains malformed JSON | Returns an empty profile `{"preferred_styles": [], "preferred_size": None, "search_history": []}` — session proceeds with no prior context. |
 
 ---
 
@@ -135,22 +204,33 @@ For each tool, describe the specific failure mode you're handling and what the a
 
 ```mermaid
 flowchart TD
-    A["User Query (natural language)"] --> B["run_agent: parse query\n(regex → description, size, max_price)"]
+    A["User Query (natural language)"] --> A1["load_style_profile()\n(user_profile.json → preferred_styles, size)"]
+    A1 --> B["run_agent: parse query\n(regex → description, size, max_price)"]
     B --> C["search_listings\n(description, size, max_price)"]
-    C -->|"returns []"| D["session['error'] = no-results message"]
-    D --> Z["Return session early\n(fit_card = None)"]
+    C -->|"returns []"| C1{"size or price\nfilter set?"}
+    C1 -->|"yes — retry"| C2["search_listings\n(loosen constraints)"]
+    C2 -->|"still empty"| D["session['error'] = no-results message"]
+    C2 -->|"found results"| C3["session['retry_info'] = what was adjusted"]
+    C1 -->|"no filters to loosen"| D
+    D --> Z["Return session early"]
     C -->|"returns results"| E["session['selected_item'] = results[0]"]
-    E --> F["suggest_outfit\n(selected_item, wardrobe)"]
-    F -->|"wardrobe empty"| G["LLM: general styling advice"]
-    F -->|"wardrobe has items"| H["LLM: specific outfits from wardrobe pieces"]
-    G --> I["session['outfit_suggestion']"]
-    H --> I
-    I --> J["create_fit_card\n(outfit_suggestion, selected_item)\ntemp=0.9"]
-    J --> K["session['fit_card']"]
-    K --> L["Return complete session\n(error = None)"]
+    C3 --> E
+    E --> F["compare_price\n(selected_item, all_listings)"]
+    F --> G["session['price_assessment']"]
+    G --> H["get_trend_report\n(selected_item)"]
+    H --> I["session['trend_report']"]
+    I --> J["suggest_outfit\n(selected_item, wardrobe,\ntrend + profile context)"]
+    J -->|"wardrobe empty"| K["LLM: general styling\n+ trend context"]
+    J -->|"wardrobe has items"| L["LLM: specific outfits\n+ trend context"]
+    K --> M["session['outfit_suggestion']"]
+    L --> M
+    M --> N["create_fit_card\n(outfit_suggestion, selected_item)\ntemp=0.9"]
+    N --> O["session['fit_card']"]
+    O --> P["save_style_profile(session)\n(persist to user_profile.json)"]
+    P --> Q["Return complete session\n(error = None)"]
 ```
 
-All state flows through the `session` dict (shown as a single object traveling top to bottom). The only branching is after `search_listings` (empty vs. non-empty results) and inside `suggest_outfit` (empty vs. non-empty wardrobe). All other steps are unconditional once the previous step succeeds.
+All state flows through the `session` dict. There are three branches: the retry logic after `search_listings` (loosen constraints or fail), the empty/non-empty wardrobe split inside `suggest_outfit`, and the early-exit error path. All other steps are unconditional.
 
 ---
 
@@ -167,6 +247,16 @@ All state flows through the `session` dict (shown as a single object traveling t
 **Milestone 4 — Planning loop and state management:**
 
 Provide Claude with the Planning Loop section, the State Management table, and the Architecture diagram from this file, plus the `_new_session()` function and its docstring from `agent.py`. Ask it to implement `run_agent()` with the five-step sequence and the early-exit condition after `search_listings`. Verify by running `python agent.py` directly — the `__main__` block exercises both the happy path (`"vintage graphic tee under $30"`) and the no-results path (`"designer ballgown size XXS under $5"`). The happy path should print a real listing title, outfit, and fit card; the no-results path should print only the error message.
+
+**Stretch features — compare_price, get_trend_report, style profile, retry logic:**
+
+For `compare_price`: Provide Claude with the Tool 4 spec block from this file (inputs, comparable-finding logic, verdict thresholds, failure mode). Ask it to implement the function in `tools.py` using only the dataset — no LLM call. Verify by calling it with a known item and checking that the comparable count is reasonable and the verdict matches the price delta.
+
+For `get_trend_report`: Provide Claude with the Tool 5 spec block and the structure of `data/trends.json`. Ask it to implement the function using the Groq LLM with trend data as context. Verify that the output mentions at least one specific trend and references the item's style tags.
+
+For retry logic: Provide Claude with the updated Planning Loop section (steps 3a–3c) and the current `run_agent()` implementation. Ask it to insert retry logic before the existing early-exit condition. Verify by running a query that matches an item but includes an impossible size — e.g., `"vintage graphic tee size XXXS"` — and confirming `session["retry_info"]` is populated and results are returned.
+
+For style profile: Provide Claude with the Style Profile Memory spec block and the `utils/profile.py` design. Ask it to implement `load_style_profile()` and `save_style_profile()`, then wire them into `run_agent()`. Verify by running two interactions in sequence and confirming the second session's `suggest_outfit` prompt includes style tags from the first.
 
 ---
 

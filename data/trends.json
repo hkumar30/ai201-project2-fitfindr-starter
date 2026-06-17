@@ -1,0 +1,51 @@
+{
+  "_source": "Aggregated from Depop trending searches, TikTok #OOTD tags, and Pinterest fashion boards",
+  "_period": "2024-2025",
+  "_note": "Simulates data that would be scraped from public fashion platform trending pages. In production this file would be refreshed via a scheduled fetch.",
+
+  "trending_aesthetics": [
+    "y2k",
+    "dark academia",
+    "coastal cowgirl",
+    "quiet luxury",
+    "gorpcore",
+    "cottagecore",
+    "indie sleaze",
+    "mob wife aesthetic",
+    "tomato girl",
+    "grunge revival",
+    "streetwear",
+    "preppy vintage"
+  ],
+
+  "trending_by_category": {
+    "tops": ["graphic tee", "band tee", "crochet", "corset", "mesh", "knitwear", "flannel"],
+    "bottoms": ["wide-leg", "cargo", "baggy jeans", "midi skirt", "linen trousers", "denim"],
+    "outerwear": ["leather bomber", "shacket", "denim jacket", "blazer", "windbreaker", "flannel"],
+    "shoes": ["platform", "mary janes", "loafers", "chelsea boots", "chunky sneakers"],
+    "accessories": ["bucket hat", "mini bag", "belt", "crossbody", "shoulder bag"]
+  },
+
+  "trending_colors": [
+    "burgundy",
+    "cream",
+    "sage green",
+    "rust",
+    "navy",
+    "olive",
+    "brown",
+    "off-white",
+    "forest green",
+    "faded black"
+  ],
+
+  "rising_searches": [
+    "vintage",
+    "thrifted",
+    "secondhand",
+    "oversized",
+    "earth tones",
+    "90s",
+    "classic"
+  ]
+}

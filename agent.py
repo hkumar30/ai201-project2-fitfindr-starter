@@ -20,7 +20,9 @@ Usage (once implemented):
 
 import re
 
-from tools import search_listings, suggest_outfit, create_fit_card
+from tools import search_listings, suggest_outfit, create_fit_card, compare_price, get_trend_report
+from utils.data_loader import load_listings
+from utils.profile import load_style_profile, save_style_profile
 
 
 # ── session state ─────────────────────────────────────────────────────────────
@@ -39,8 +41,11 @@ def _new_session(query: str, wardrobe: dict) -> dict:
         "query": query,              # original user query
         "parsed": {},                # extracted description / size / max_price
         "search_results": [],        # list of matching listing dicts
+        "retry_info": None,          # set if retry logic loosened a constraint
         "selected_item": None,       # top result, passed into suggest_outfit
         "wardrobe": wardrobe,        # user's wardrobe dict
+        "price_assessment": None,    # string returned by compare_price
+        "trend_report": None,        # string returned by get_trend_report
         "outfit_suggestion": None,   # string returned by suggest_outfit
         "fit_card": None,            # string returned by create_fit_card
         "error": None,               # set if the interaction ended early
@@ -65,39 +70,17 @@ def run_agent(query: str, wardrobe: dict) -> dict:
         first — if it is not None, the interaction ended early and the other
         output fields (outfit_suggestion, fit_card) will be None.
 
-    TODO — implement this function using the planning loop you designed in planning.md:
-
-        Step 1: Initialize the session with _new_session().
-
-        Step 2: Parse the user's query to extract a description, size, and
-                max_price. You can use regex, string splitting, or ask the LLM
-                to parse it — document your choice in planning.md.
-                Store the result in session["parsed"].
-
-        Step 3: Call search_listings() with the parsed parameters.
-                Store results in session["search_results"].
-                If no results: set session["error"] to a helpful message and
-                return the session early. Do NOT proceed to suggest_outfit
-                with empty input.
-
-        Step 4: Select the item to use (e.g., the top result).
-                Store it in session["selected_item"].
-
-        Step 5: Call suggest_outfit() with the selected item and wardrobe.
-                Store the result in session["outfit_suggestion"].
-
-        Step 6: Call create_fit_card() with the outfit suggestion and selected item.
-                Store the result in session["fit_card"].
-
-        Step 7: Return the session.
-
-    Before writing code, complete the Planning Loop and State Management sections
-    of planning.md — your implementation should match what you described there.
+    Flow: load profile → parse query → search (with retry) → compare_price →
+          get_trend_report → suggest_outfit (with trend + profile context) →
+          create_fit_card → save profile → return session.
     """
-    # Step 1: initialize session
+    # Step 1: load style profile from previous sessions
+    profile = load_style_profile()
+
+    # Step 2: initialize session
     session = _new_session(query, wardrobe)
 
-    # Step 2: parse query with regex
+    # Step 3: parse query with regex
     # --- extract max_price ---
     price_match = re.search(
         r'(?:under|below|less than|up to|max|no more than)\s*\$?(\d+(?:\.\d+)?)',
@@ -144,12 +127,33 @@ def run_agent(query: str, wardrobe: dict) -> dict:
         "max_price": max_price,
     }
 
-    # Step 3: search — early exit if nothing found
-    results = search_listings(
-        session["parsed"]["description"],
-        session["parsed"]["size"],
-        session["parsed"]["max_price"],
-    )
+    # Step 4: search with retry logic
+    results = search_listings(description, size, max_price)
+
+    # Retry 1: drop size filter
+    if not results and size is not None:
+        results = search_listings(description, None, max_price)
+        if results:
+            session["retry_info"] = (
+                f"No results found for size '{size}'. "
+                f"Showing results without size filter."
+            )
+
+    # Retry 2: drop price filter as well
+    if not results and max_price is not None:
+        results = search_listings(description, None, None)
+        if results:
+            if size is not None:
+                session["retry_info"] = (
+                    f"No results found for size '{size}' under ${max_price:.0f}. "
+                    f"Showing results with size and price filters removed."
+                )
+            else:
+                session["retry_info"] = (
+                    f"No results found under ${max_price:.0f}. "
+                    f"Showing results with price filter removed."
+                )
+
     session["search_results"] = results
 
     if not results:
@@ -159,22 +163,43 @@ def run_agent(query: str, wardrobe: dict) -> dict:
         )
         return session
 
-    # Step 4: select top result
+    # Step 5: select top result
     session["selected_item"] = results[0]
 
-    # Step 5: suggest outfit using the selected item and the session's wardrobe
+    # Step 6: price comparison (no LLM — pure dataset math)
+    all_listings = load_listings()
+    session["price_assessment"] = compare_price(session["selected_item"], all_listings)
+
+    # Step 7: trend report (LLM + trends.json)
+    session["trend_report"] = get_trend_report(session["selected_item"])
+
+    # Step 8: build combined context string for suggest_outfit
+    context_parts = []
+    if session["trend_report"] and "unavailable" not in session["trend_report"]:
+        context_parts.append(f"Trend context:\n{session['trend_report']}")
+    if profile.get("preferred_styles"):
+        context_parts.append(
+            f"This user's style history: {', '.join(profile['preferred_styles'][:8])}"
+        )
+    outfit_context = "\n\n".join(context_parts) if context_parts else None
+
+    # Step 9: suggest outfit (now informed by trends and style history)
     session["outfit_suggestion"] = suggest_outfit(
         session["selected_item"],
         session["wardrobe"],
+        context=outfit_context,
     )
 
-    # Step 6: generate fit card from the outfit and the same selected item
+    # Step 10: generate fit card
     session["fit_card"] = create_fit_card(
         session["outfit_suggestion"],
         session["selected_item"],
     )
 
-    # Step 7: return completed session
+    # Step 11: persist style preferences for next session
+    save_style_profile(session)
+
+    # Step 12: return completed session
     return session
 
 
