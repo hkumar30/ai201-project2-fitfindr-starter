@@ -9,6 +9,9 @@ __pycache__/
 venv/
 env/
 
+# User profile
+user_profile.json
+
 # Jupyter
 .ipynb_checkpoints/
 
